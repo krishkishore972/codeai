@@ -1,31 +1,25 @@
-import type { OpenAIToolDefinition } from "../providers/types.ts";
+// What a tool returns after execution
+export interface ToolResult {
+	output: string; // text sent back to the LLM
+	isError: boolean;
+}
 
-export interface Tool<TArgs = unknown, TResult = unknown> {
+// Every tool implements this interface
+export interface Tool {
 	name: string;
 	description: string;
-	/** JSON Schema for args */
-	parameters: Record<string, unknown>;
-	execute(args: TArgs): Promise<TResult>;
+	inputSchema: Record<string, unknown>; // JSON Schema — tells the LLM what fields to pass
+	readOnly?: boolean; // true = observes only; runs without asking permission
+	execute(input: Record<string, unknown>): Promise<ToolResult>;
 }
 
-export function toOpenAITool(tool: Tool): OpenAIToolDefinition {
-	return {
-		type: "function",
-		function: {
-			name: tool.name,
-			description: tool.description,
-			parameters: tool.parameters,
-		},
-	};
+// Helper: wrap a caught error as a ToolResult
+export function errorResult(err: unknown): ToolResult {
+	const msg = err instanceof Error ? err.message : String(err);
+	return { output: `Error: ${msg}`, isError: true };
 }
 
-export function buildToolMap(tools: Tool[]): Map<string, Tool> {
-	const map = new Map<string, Tool>();
-	for (const tool of tools) {
-		if (map.has(tool.name)) {
-			throw new Error(`Duplicate tool name: ${tool.name}`);
-		}
-		map.set(tool.name, tool);
-	}
-	return map;
+// Helper: wrap plain text as a success ToolResult
+export function okResult(output: string): ToolResult {
+	return { output, isError: false };
 }
