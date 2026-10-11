@@ -1,40 +1,41 @@
-import type OpenAI from "openai";
+import type { Message, StopReason, UsageStats } from "../types.js";
 
-export type ChatMessage =
-	OpenAI.Chat.Completions.ChatCompletionMessageParam;
+// Every event the provider can stream back to the agent loop
+export type StreamEvent =
+	| { type: "text_delta"; delta: string }
+	| { type: "tool_use_start"; id: string; name: string }
+	| { type: "tool_use_input_delta"; id: string; delta: string }
+	| { type: "tool_use_end"; id: string }
+	| { type: "message_end"; stop_reason: StopReason; usage: UsageStats };
 
-export type OpenAIToolDefinition = {
-	type: "function";
-	function: {
-		name: string;
-		description: string;
-		parameters: Record<string, unknown>;
-	};
-};
+// How we describe a tool to the LLM (JSON Schema format)
+export interface ToolDefinition {
+	name: string;
+	description: string;
+	input_schema: Record<string, unknown>; // JSON Schema object
+}
 
-export type ChatRequest = {
+// What you pass to provider.complete()
+export interface CompletionOptions {
 	model: string;
-	messages: ChatMessage[];
-	tools?: OpenAIToolDefinition[];
-	tool_choice?: "auto" | "none" | "required";
-};
+	system: string;
+	messages: Message[];
+	tools: ToolDefinition[];
+	max_tokens: number;
+	temperature?: number;
+}
 
-export type Usage = {
-	prompt_tokens: number;
-	completion_tokens: number;
-	total_tokens: number;
-};
+// Every provider implements this interface
+export interface Provider {
+	name: string;
+	complete(options: CompletionOptions): AsyncGenerator<StreamEvent>;
+}
 
-export type ChatResponseMessage = {
-	content: string | null;
-	tool_calls?: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[];
-};
-
-export interface LLMProvider {
-	readonly name: string;
-	readonly defaultModel: string;
-	chat(request: ChatRequest): Promise<{
-		message: ChatResponseMessage;
-		usage?: Usage;
-	}>;
+// Info about a model — used for listing and validation
+export interface ModelInfo {
+	id: string;
+	name: string;
+	provider: string;
+	contextWindow: number;
+	maxOutputTokens: number;
 }

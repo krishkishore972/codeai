@@ -1,21 +1,19 @@
-import { groqApiKeyValue, groqBaseUrl, model } from "../config.ts";
-import { createOpenAIProvider } from "./openai.ts";
-import type { LLMProvider } from "./types.ts";
+import type { Provider } from "./types";
+import { createGroqProvider } from "./groq.js";
+export {
+	MODELS,
+	getDefaultModel,
+	getModelInfo,
+	getProviderModels,
+} from "./model-info";
 
-let cached: LLMProvider | null = null;
-
-/** Default provider: OpenAI SDK pointed at Groq. Swap/add providers here later. */
-export function getDefaultProvider(): LLMProvider {
-	if (!cached) {
-		cached = createOpenAIProvider({
-			apiKey: groqApiKeyValue,
-			baseURL: groqBaseUrl,
-			defaultModel: model,
-		});
-	}
-	return cached;
+export function createProvider(providerName: string, apiKey: string): Provider {
+  switch (providerName) {
+    case "groq":
+      return createGroqProvider(apiKey);
+    default:
+      // later add anthropic, gemini, etc
+      throw new Error(`Unknown provider: "${providerName}". Available: groq`);
+  }
 }
 
-export function getDefaultModel(): string {
-	return model;
-}
