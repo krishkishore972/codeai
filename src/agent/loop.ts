@@ -1,239 +1,213 @@
+import { friendlyProviderError } from "../providers/error";
+import { createProvider } from "../providers/index.js";
+import type { StreamEvent } from "../providers/types.js";
+import { getTool, getToolDefinitions } from "../tools/index.js";
 import type {
-	ChatMessage,
-	LLMProvider,
-	Usage,
-} from "../providers/types.ts";
-import { buildToolMap, toOpenAITool, type Tool } from "../tools/types.ts";
-import { DEFAULT_SYSTEM_PROMPT } from "./system.ts";
+  ContentBlock,
+  Message,
+  ToolResultBlock,
+  ToolUseBlock,
+} from "../types";
+import type { AgentEvent, AgentOptions } from "./types.js";
 
-export type AgentEvent =
-	| { type: "thinking"; step: number }
-	| { type: "tool_start"; step: number; tool: string; args: unknown }
-	| {
-			type: "tool_end";
-			step: number;
-			tool: string;
-			ok: boolean;
-			ms: number;
-	  }
-	| { type: "done"; steps: number; usage: Usage };
+const DEFAULT_MAx_TURNS = 20;
 
-export type RunAgentOptions = {
-	provider: LLMProvider;
-	model?: string;
-	system?: string;
-	userInput: string;
-	previousMessages?: ChatMessage[];
-	tools?: Tool[];
-	maxSteps?: number;
-	onEvent?: (event: AgentEvent) => void;
+const API_KEY_ENV: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  gemini: "GEMINI_API_KEY",
+  groq: "GROQ_API_KEY",
 };
 
-export type AgentResult = {
-	answer: string;
-	messages: ChatMessage[];
-	steps: number;
-	usage: Usage;
-};
+export function getApiKey(providerName: string): string {
+  const envVar = API_KEY_ENV[providerName];
+  if (!envVar) throw new Error(`Unknown provider: ${providerName}`);
 
-const emptyUsage = (): Usage => ({
-	prompt_tokens: 0,
-	completion_tokens: 0,
-	total_tokens: 0,
-});
-
-function addUsage(a: Usage, b?: Usage): Usage {
-	if (!b) return a;
-	return {
-		prompt_tokens: a.prompt_tokens + b.prompt_tokens,
-		completion_tokens: a.completion_tokens + b.completion_tokens,
-		total_tokens: a.total_tokens + b.total_tokens,
-	};
+  const key = process.env[envVar];
+  if (!key)
+    throw new Error(`Missing env var: ${envVar} (needed for ${providerName})`);
+  return key;
 }
 
-function safeParseJson(raw: string): unknown {
-	try {
-		return raw.trim() === "" ? {} : JSON.parse(raw);
-	} catch {
-		throw new Error(`Invalid JSON tool arguments: ${raw}`);
-	}
+// Pass provider events straight through, but translate a thrown SDK blob into
+// something a person can act on.
+async function* streamCompletion(
+  source: AsyncGenerator<StreamEvent>,
+  providerName: string,
+  model: string,
+): AsyncGenerator<StreamEvent> {
+  try {
+    yield* source;
+  } catch (err) {
+    throw new Error(friendlyProviderError(err, providerName, model));
+  }
 }
 
-function ensureSystemMessage(
-	messages: ChatMessage[],
-	system: string,
-): ChatMessage[] {
-	if (messages.length > 0 && messages[0]?.role === "system") return messages;
-	return [{ role: "system", content: system }, ...messages];
+// Core agent loop: stream a completion, run any tool calls the model requests,
+// feed the results back, and repeat until the model stops calling tools.
+export async function* runAgent(
+  options: AgentOptions,
+): AsyncGenerator<AgentEvent> {
+  const provider = createProvider(
+    options.providerName,
+    getApiKey(options.providerName),
+  );
+  const tools = getToolDefinitions();
+  let messages: Message[] = [...options.messages];
+  let turns = 0;
+  const maxTurns = options.maxTurns ?? DEFAULT_MAx_TURNS;
+
+  // Messages produced by this run, in order. Tracked separately from `messages`
+  // because compaction rewrites the history, which breaks index-based diffing.
+  const newMessages: Message[] = [];
+
+  yield { type: "agent_start" };
+
+  while (turns < maxTurns) {
+    turns++;
+
+    // Compact before asking the model, so a long history never overflows the window.
+
+    const assistantBlocks: ContentBlock[] = [];
+
+    // Tool calls stream in as fragments keyed by id; assemble them here.
+    const pendingToolCalls: Record<
+      string,
+      { name: string; inputJson: string }
+    > = {};
+
+    const stream = streamCompletion(
+      provider.complete({
+        model: options.model,
+        system: options.system,
+        messages,
+        tools,
+        max_tokens: 8192,
+      }),
+      options.providerName,
+      options.model,
+    );
+
+    for await (const event of stream) {
+      if (event.type === "text_delta") {
+        yield { type: "text_delta", delta: event.delta };
+        const last = assistantBlocks.at(-1);
+        if (last?.type === "text") last.text += event.delta;
+        else assistantBlocks.push({ type: "text", text: event.delta });
+      }
+
+      if (event.type === "tool_use_start") {
+        pendingToolCalls[event.id] = { name: event.name, inputJson: "" };
+      }
+
+      if (event.type === "tool_use_input_delta") {
+        if (pendingToolCalls[event.id]) {
+          pendingToolCalls[event.id]!.inputJson += event.delta;
+        }
+      }
+
+      if (event.type === "tool_use_end") {
+        const tc = pendingToolCalls[event.id]!;
+        const parsedInput = JSON.parse(tc.inputJson || "{}");
+        assistantBlocks.push({
+          type: "tool_use",
+          id: event.id,
+          name: tc.name,
+          arguments: parsedInput,
+        });
+      }
+
+      if (event.type === "message_end") {
+        yield {
+          type: "turn_end",
+          stop_reason: event.stop_reason,
+          usage: event.usage,
+        };
+      }
+    }
+
+    const assistantMessage: Message = {
+      role: "assistant",
+      content: assistantBlocks,
+    };
+    messages.push(assistantMessage);
+    newMessages.push(assistantMessage);
+
+    // Gemini reports "end_turn" even when it calls tools, so decide based on the
+    // blocks we actually received rather than on the stop reason.
+    const hasToolCalls = assistantBlocks.some((b) => b.type === "tool_use");
+    if (!hasToolCalls) break;
+
+    const toolResultBlocks: ToolResultBlock[] = [];
+    for (const block of assistantBlocks) {
+      if (block.type !== "tool_use") continue;
+      const toolCall = block as ToolUseBlock;
+
+      yield {
+        type: "tool_start",
+        id: toolCall.id,
+        name: toolCall.name,
+        input: toolCall.arguments,
+      };
+
+      const result = await runToolCall(toolCall, options);
+
+      if (result.denied) {
+        yield {
+          type: "tool_denied",
+          id: toolCall.id,
+          name: toolCall.name,
+          reason: result.output,
+        };
+      }
+      yield {
+        type: "tool_end",
+        id: toolCall.id,
+        name: toolCall.name,
+        result: result.output,
+        isError: result.isError,
+      };
+
+      toolResultBlocks.push({
+        type: "tool_result",
+        tool_use_id: toolCall.id,
+        content: result.output,
+        is_error: result.isError,
+      });
+    }
+    const toolResultMessage: Message = {
+      role: "user",
+      content: toolResultBlocks,
+    };
+    messages.push(toolResultMessage);
+    newMessages.push(toolResultMessage);
+  }
+
+  yield { type: "agent_end", messages, newMessages };
 }
 
-/**
- * Generic provider-agnostic ReAct loop.
- * Future file/shell tools just get added to `tools` — no loop changes needed.
- */
-export async function runAgent(
-	options: RunAgentOptions,
-): Promise<AgentResult> {
-	const {
-		provider,
-		model = provider.defaultModel,
-		system = DEFAULT_SYSTEM_PROMPT,
-		userInput,
-		previousMessages = [],
-		tools = [],
-		maxSteps = 25,
-		onEvent,
-	} = options;
+interface ToolCallOutcome {
+	output: string;
+	isError: boolean;
+	denied?: boolean;
+}
 
-	const toolMap = buildToolMap(tools);
-	const openAITools = tools.map(toOpenAITool);
+// Resolve one tool call: look it up, clear it with the permission gate, run it.
+// A denial comes back as an error result so the model can adapt rather than the
+// run dying.
+async function runToolCall(toolCall: ToolUseBlock, options: AgentOptions): Promise<ToolCallOutcome> {
+	const tool = getTool(toolCall.name);
+	if (!tool) return { output: `Unknown tool: ${toolCall.name}`, isError: true };
 
-	let messages: ChatMessage[] = ensureSystemMessage(
-		[...previousMessages, { role: "user", content: userInput }],
-		system,
-	);
-
-	let usage = emptyUsage();
-	let steps = 0;
-
-	while (true) {
-		if (steps >= maxSteps) {
-			throw new Error(
-				`Agent exceeded maxSteps (${maxSteps}). Last input still unresolved.`,
-			);
-		}
-		steps += 1;
-		onEvent?.({ type: "thinking", step: steps });
-
-		const { message, usage: turnUsage } = await provider.chat({
-			model,
-			messages,
-			tools: openAITools.length > 0 ? openAITools : undefined,
-			tool_choice: "auto",
-		});
-		usage = addUsage(usage, turnUsage);
-
-		const toolCalls = message.tool_calls ?? [];
-
-		// No tools requested -> final answer
-		if (toolCalls.length === 0) {
-			const answer = message.content ?? "";
-			messages = [...messages, { role: "assistant", content: answer }];
-			onEvent?.({ type: "done", steps, usage });
-			return { answer, messages, steps, usage };
-		}
-
-		messages = [
-			...messages,
-			{
-				role: "assistant",
-				content: message.content,
-				tool_calls: toolCalls,
-			},
-		];
-
-		// Execute requested tools sequentially (keeps message order deterministic).
-		// Parallel is possible later with Promise.all + ordered push.
-		for (const call of toolCalls) {
-			if (call.type !== "function") {
-				messages = [
-					...messages,
-					{
-						role: "tool",
-						tool_call_id: call.id,
-						content: JSON.stringify({
-							error: "Only function tools are supported",
-						}),
-					},
-				];
-				continue;
-			}
-
-			const toolName = call.function.name;
-			const tool = toolMap.get(toolName);
-			const startedAt = Date.now();
-			let args: unknown = null;
-
-			try {
-				args = safeParseJson(call.function.arguments);
-			} catch (error) {
-				messages = [
-					...messages,
-					{
-						role: "tool",
-						tool_call_id: call.id,
-						content: JSON.stringify({
-							error: error instanceof Error ? error.message : String(error),
-						}),
-					},
-				];
-				onEvent?.({
-					type: "tool_end",
-					step: steps,
-					tool: toolName,
-					ok: false,
-					ms: Date.now() - startedAt,
-				});
-				continue;
-			}
-
-			if (!tool) {
-				messages = [
-					...messages,
-					{
-						role: "tool",
-						tool_call_id: call.id,
-						content: JSON.stringify({ error: `Unknown tool: ${toolName}` }),
-					},
-				];
-				onEvent?.({
-					type: "tool_end",
-					step: steps,
-					tool: toolName,
-					ok: false,
-					ms: Date.now() - startedAt,
-				});
-				continue;
-			}
-
-			onEvent?.({ type: "tool_start", step: steps, tool: toolName, args });
-
-			try {
-				const result = await tool.execute(args);
-				messages = [
-					...messages,
-					{
-						role: "tool",
-						tool_call_id: call.id,
-						content: JSON.stringify(result).slice(0, 20_000),
-					},
-				];
-				onEvent?.({
-					type: "tool_end",
-					step: steps,
-					tool: toolName,
-					ok: true,
-					ms: Date.now() - startedAt,
-				});
-			} catch (error) {
-				messages = [
-					...messages,
-					{
-						role: "tool",
-						tool_call_id: call.id,
-						content: JSON.stringify({
-							error: error instanceof Error ? error.message : String(error),
-						}),
-					},
-				];
-				onEvent?.({
-					type: "tool_end",
-					step: steps,
-					tool: toolName,
-					ok: false,
-					ms: Date.now() - startedAt,
-				});
-			}
+	// Read-only tools observe without changing anything, so they never prompt.
+	if (!tool.readOnly && options.canUseTool) {
+		const decision = await options.canUseTool(toolCall.name, toolCall.arguments);
+		if (decision.behavior === "deny") {
+			return { output: decision.message, isError: true, denied: true };
 		}
 	}
+
+	return tool.execute(toolCall.arguments).catch((err) => ({
+		output: `Tool error: ${err instanceof Error ? err.message : String(err)}`,
+		isError: true,
+	}));
 }
