@@ -1,12 +1,25 @@
-import { askAgent, type ChatMessage } from "../agent/ask-agent.ts";
+import { runAgent } from "../agent/loop.js";
+import { buildSystemPrompt } from "../config/system-prompt.js";
+import { allowAll } from "../permissions/types.js";
+import { getDefaultModel, getModelInfo, MODELS } from "../providers/index.js";
+import { getToolDefinitions } from "../tools/index.js";
+import type { Message } from "../types.js";
 
-export async function main() {
-	console.log("======================================");
-	console.log("          Groq Web Search Agent");
-	console.log("======================================");
-	console.log('Type "exit" to quit.\n');
+const DEFAULT_PROVIDER = "groq";
 
-	let conversation: ChatMessage[] = [];
+export async function main(): Promise<void> {
+	console.log("======================================");
+	console.log("        CodeAI Agent (Groq)");
+	console.log("======================================");
+	console.log('Type "exit" or "quit" to exit.\n');
+
+	const model = getDefaultModel(DEFAULT_PROVIDER);
+
+	const system = await buildSystemPrompt();
+
+	let messages: Message[] = [];
+	let conversationActive = true;
+
 	console.write("You: ");
 
 	for await (const line of console) {
@@ -15,15 +28,53 @@ export async function main() {
 			console.write("You: ");
 			continue;
 		}
-		if (input.toLowerCase() === "exit") {
-			console.log("\nGoodbye");
+		if (input.toLowerCase() === "exit" || input.toLowerCase() === "quit") {
+			console.log("\nGoodbye!");
 			break;
 		}
 
+		messages.push({ role: "user", content: input });
+
 		try {
-			const result = await askAgent(input, conversation);
-			conversation = result.messages;
-			console.log(`\nAI: ${result.answer}\n`);
+			let assistantResponse = "";
+
+			for await (const event of runAgent({
+				providerName: DEFAULT_PROVIDER,
+				model,
+				system,
+				messages,
+				maxTurns: 20,
+				canUseTool: allowAll,
+			})) {
+				switch (event.type) {
+					case "text_delta":
+						assistantResponse += event.delta;
+						break;
+					case "tool_start":
+						console.log(`\n🔧 Tool: ${event.name}`);
+						break;
+					case "tool_end":
+						if (event.isError) {
+							console.log(`    Error: ${event.result}`);
+						} else {
+							console.log(`   Done`);
+						}
+						break;
+					case "tool_denied":
+						console.log(`    Denied: ${event.reason}`);
+						break;
+					case "turn_end":
+						console.log(`\n   [Turn ended: ${event.stop_reason}, tokens: ${event.usage.input_tokens}+${event.usage.output_tokens}]`);
+						break;
+					case "agent_end":
+						messages = event.messages;
+						break;
+				}
+			}
+
+			if (assistantResponse) {
+				console.log(`\nAI: ${assistantResponse}\n`);
+			}
 		} catch (error) {
 			console.error(
 				"\nError:",
@@ -31,6 +82,9 @@ export async function main() {
 				"\n",
 			);
 		}
+
 		console.write("You: ");
 	}
 }
+
+await main();

@@ -1,17 +1,14 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Tool } from "../tools/types.ts";
+import { ALL_TOOLS } from "../tools/index.js";
 
 // Project context files, loaded in priority order if present.
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".context", ".cogent/context.md"];
 
 // Assemble the system prompt from base instructions, the tool list, any project
 // context files, and an optional extra string from settings.
-export async function buildSystemPrompt(
-	tools: Tool[] = [],
-	extra?: string,
-): Promise<string> {
+export async function buildSystemPrompt(extra?: string): Promise<string> {
 	const base = `You are cogent, an autonomous coding assistant.
 You are running in: ${process.cwd()}
 Today: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
@@ -21,8 +18,8 @@ Use tools proactively to understand the codebase before making changes.
 Always read a file before editing it. Verify your changes work.
 Be concise. No sycophantic openers. No unnecessary explanation.`;
 
-	const toolsList = tools.map((t: Tool) => `- ${t.name}: ${t.description}`).join("\n");
-	const toolsSection = toolsList ? `\nAvailable tools:\n${toolsList}` : "";
+	const toolsList = ALL_TOOLS.map((t) => `- ${t.name}: ${t.description}`).join("\n");
+	const toolsSection = `\nAvailable tools:\n${toolsList}`;
 
 	let contextSection = "";
 	for (const filename of CONTEXT_FILES) {
