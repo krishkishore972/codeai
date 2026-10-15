@@ -6,7 +6,7 @@
  * current products, current documentation, or facts that may have changed.
  * Returns a structured result with an answer summary and individual search results.
  */
-import { tvly } from "../config.ts";
+import { tvly } from "../config/config.ts";
 import type { Tool } from "./types.ts";
 import { errorResult, okResult } from "./types.ts";
 

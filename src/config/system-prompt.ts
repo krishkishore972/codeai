@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ALL_TOOLS } from "../tools/index.js";
+import { getToolDefinitions } from "../tools/index.js";
 
 // Project context files, loaded in priority order if present.
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md", ".context", ".cogent/context.md"];
@@ -18,8 +18,9 @@ Use tools proactively to understand the codebase before making changes.
 Always read a file before editing it. Verify your changes work.
 Be concise. No sycophantic openers. No unnecessary explanation.`;
 
-	const toolsList = ALL_TOOLS.map((t) => `- ${t.name}: ${t.description}`).join("\n");
-	const toolsSection = `\nAvailable tools:\n${toolsList}`;
+	const tools = getToolDefinitions();
+	const toolsList = tools.map((t) => `- ${t.name}: ${t.description}`).join("\n");
+	const toolsSection = toolsList ? `\nAvailable tools:\n${toolsList}` : "";
 
 	let contextSection = "";
 	for (const filename of CONTEXT_FILES) {

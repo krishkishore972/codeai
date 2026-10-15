@@ -1,9 +1,8 @@
-import { runAgent } from "../agent/loop.js";
-import { buildSystemPrompt } from "../config/system-prompt.js";
-import { allowAll } from "../permissions/types.js";
-import { getDefaultModel, getModelInfo, MODELS } from "../providers/index.js";
-import { getToolDefinitions } from "../tools/index.js";
-import type { Message } from "../types.js";
+import { runAgent } from "./agent/loop.js";
+import { buildSystemPrompt } from "./config/system-prompt.js";
+import { allowAll } from "./permissions/types.js";
+import { getDefaultModel, getModelInfo, MODELS } from "./providers/index.js";
+import type { Message } from "./types.js";
 
 const DEFAULT_PROVIDER = "groq";
 
@@ -18,7 +17,6 @@ export async function main(): Promise<void> {
 	const system = await buildSystemPrompt();
 
 	let messages: Message[] = [];
-	let conversationActive = true;
 
 	console.write("You: ");
 
@@ -57,7 +55,7 @@ export async function main(): Promise<void> {
 						if (event.isError) {
 							console.log(`    Error: ${event.result}`);
 						} else {
-							console.log(`   Done`);
+							console.log(`    Done`);
 						}
 						break;
 					case "tool_denied":
