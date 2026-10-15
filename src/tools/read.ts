@@ -1,18 +1,13 @@
-/**
- * Read File Tool
- * 
- * Reads the contents of a file from the filesystem and returns it with line numbers.
- * Supports optional offset and limit parameters for reading specific ranges.
- * This is a read-only tool that doesn't require user confirmation.
- */
+// Read tool — returns a file's contents with 1-indexed line numbers prefixed.
+
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Tool } from "./types.js";
 import { errorResult, okResult } from "./types.js";
 
-export const readFileTool: Tool = {
-	name: "read_file",
+export const readTool: Tool = {
+	name: "Read",
 	description:
 		"Read the contents of a file. Returns content with line numbers prefixed (e.g. '1\\tline content'). " +
 		"Use offset and limit to read a specific range of lines.",
